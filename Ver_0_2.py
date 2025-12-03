@@ -7,6 +7,8 @@ from PyQt5.QtCore import Qt, QPoint
 from PyQt5.QtGui import QCursor, QColor, QTransform
 from BaseElement import *
 
+CONNECTION_MARGIN = 40
+
 
 class ConnectionPoint:
     def __init__(self, parent, kind):
@@ -552,7 +554,7 @@ class WidgetWithObjects(QtWidgets.QWidget):
     #     super().resizeEvent(event)
 
     def pos_scene(self, event):
-        scene_pos = event.pos() + QtCore.QPoint(self.horizontalScrollBar().value(), self.verticalScrollBar().value())
+        scene_pos = event.pos() - self.scene_offset
         return scene_pos
 
     def clamp_scene_offset(self, offset):
@@ -590,7 +592,6 @@ class WidgetWithObjects(QtWidgets.QWidget):
         # offset = QtCore.QPoint(-self.horizontalScrollBar().value(), -self.verticalScrollBar().value())
         # painter.save()
         # painter.translate(offset)
-        self.draw_grid(painter)
         for obj in self.objects:
             obj.paint(painter)
             painter.drawPixmap(obj.position.x(), obj.position.y(), obj.size, obj.size, obj.image)
@@ -624,6 +625,7 @@ class WidgetWithObjects(QtWidgets.QWidget):
 
     def get_connection_point_at(self, pos):
         result = []
+        scene_pos = pos - self.scene_offset
         for obj in reversed(self.objects):
             if type(obj.in_point) == list:
                 for x in obj.in_point:
@@ -636,7 +638,7 @@ class WidgetWithObjects(QtWidgets.QWidget):
             else:
                 result.append(obj.out_point)
             for point in result:
-                if point.contains(pos):
+                if point.contains(scene_pos):
                     return point, obj
         return None, None
 
@@ -698,11 +700,18 @@ class WidgetWithObjects(QtWidgets.QWidget):
                 self.controller.set_element(None)
                 self.unsetCursor()
                 self.update()
+            if event.button() == QtCore.Qt.RightButton:
+                # Отмена выбора элемента по правому клику
+                self.selected_element = None
+                self.controller.set_element(None)
+                self.unsetCursor()
+                self.update()
+                return
         elif event.button() == QtCore.Qt.MiddleButton:
             self.dragging = True
             self.drag_start_pos = event.pos()
             self.offset_at_drag_start = self.scene_offset
-        else:
+        elif event.button() == QtCore.Qt.LeftButton:
             # Перетаскивание объектов
             scene_pos = self.pos_scene(event)
             for obj in reversed(self.objects):
@@ -716,16 +725,34 @@ class WidgetWithObjects(QtWidgets.QWidget):
 
     def mouseMoveEvent(self, event):
         if self.selected_object and self.selected_object.dragging:
-            # Перетаскивание объекта
             scene_pos = self.pos_scene(event)
             new_pos = scene_pos - self.offset
             new_pos = self.snap_to_grid(new_pos)
+            # Ограничение по границам сцены с учетом margin
+            margin = CONNECTION_MARGIN
+            max_x = self.scene_width - self.selected_object.size - margin
+            max_y = self.scene_height - self.selected_object.size - margin
+            new_pos.setX(max(margin, min(new_pos.x(), max_x)))
+            new_pos.setY(max(margin, min(new_pos.y(), max_y)))
             self.selected_object.position = new_pos
             self.update()
+            # # Перетаскивание объекта
+            # scene_pos = self.pos_scene(event)
+            # new_pos = scene_pos - self.offset
+            # new_pos = self.snap_to_grid(new_pos)
+            # self.selected_object.position = new_pos
+            # self.update()
         if self.dragging:
-            delta = self.pos_scene(event)
-            self.horizontalScrollBar().setValue(self.start_scroll_x - delta.x())
-            self.verticalScrollBar().setValue(self.start_scroll_y - delta.y())
+            # Панорамирование сцены
+            delta = event.pos() - self.drag_start_pos
+            new_offset = self.offset_at_drag_start + delta
+            # Привязка смещения к сетке
+            new_offset = self.clamp_scene_offset(new_offset)
+            self.scene_offset = new_offset
+            self.update()
+            # new_offset = self.snap_to_grid(new_offset)
+            # self.scene_offset = new_offset
+            # self.update()
 
     def get_obj_rect_at(self, pos, obj):
         rect = QtCore.QRect(pos.x(), pos.y(), obj.size, obj.size)
@@ -882,7 +909,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(self.redactor)
 
         self.mapWidget = QtWidgets.QDockWidget('Карта', self)
-        self.mapWidget.setMinimumSize(QtCore.QSize(220, 220))
+        self.mapWidget.setMinimumSize(QtCore.QSize(220, 120))
         self.mapWidget.setStyleSheet("background-color: rgb(177, 177, 177);")
         self.mapWidget.setAllowedAreas(QtCore.Qt.RightDockWidgetArea | QtCore.Qt.LeftDockWidgetArea)
         self.mapWidgetContents = MapWidget(self.redactor)
@@ -912,7 +939,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dockWidgetContents.currentItemChanged.connect(self.item_changed)
         self.dockWidget.setWidget(self.dockWidgetContents)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dockWidget)
+        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.mapWidget)
+        self.splitDockWidget(self.mapWidget, self.dockWidget, QtCore.Qt.Vertical)
+        self.mapWidget.resize(220, 100)
 
+        self.resizeDocks([self.mapWidget, self.dockWidget], [200, 300], QtCore.Qt.Vertical)
     def item_changed(self, current, previous):
         if current:
             self.controller.set_element(current.text())
