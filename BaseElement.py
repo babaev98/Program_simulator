@@ -197,6 +197,7 @@ class Sensor:
     def __init__(self, sensor_type):
         self.sensor_type = sensor_type
         self.value = None
+        self.index = None
 
     def update(self, value, rattle_range=0.0):
         # Обновить значение с учетом дребезга

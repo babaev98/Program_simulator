@@ -3,12 +3,12 @@ import os
 from PyQt5 import QtCore, QtGui, QtWidgets
 import sys, heapq
 
-from PyQt5.QtCore import Qt, QPoint
+from PyQt5.QtCore import Qt, QPoint, QRect
 from PyQt5.QtGui import QCursor, QColor, QTransform
 from BaseElement import *
 
 CONNECTION_MARGIN = 40
-
+MIN_DISTANCE = 60
 
 class ConnectionPoint:
     def __init__(self, parent, kind):
@@ -72,11 +72,11 @@ class ConnectionPoint:
 
     def contains(self, pos):
         if type(self.parent) != QPipeIntersection:
-            point = self.get_pos()
+            point = self.get_pos() - self.parent.parent_widget.scene_offset
             radius = 8  # чуть больше радиуса рисования
             return (point - pos).manhattanLength() <= radius
         else:
-            point = QtCore.QPoint(self.x, self.y)
+            point = QtCore.QPoint(self.x, self.y)  - self.parent.parent_widget.scene_offset
             radius = 8  # чуть больше радиуса рисования
             return (point - pos).manhattanLength() <= radius
 
@@ -113,7 +113,7 @@ class DraggableObject:
         height = 2 * ry
         return (left, top, width, height)
 
-    def __init__(self, x, y, tag="Element", size=40, color=QtGui.QColor(100, 200, 150), image_path=None, logic_element=None, process_scheme=None):
+    def __init__(self, x, y, parent_widget, tag="Element", size=40, color=QtGui.QColor(100, 200, 150),  image_path=None, logic_element=None, process_scheme=None):
         self.position = QtCore.QPoint(x, y)
         self.size = size  # Квадрат 50x50
         self.color = color
@@ -125,13 +125,14 @@ class DraggableObject:
             process_scheme.add_element(self.logic_element)
         self.in_point = ConnectionPoint(self, 'in')
         self.out_point = ConnectionPoint(self, 'out')
+        self.parent_widget:WidgetWithObjects = parent_widget
 
     def contains(self, point):
         if type(self) != QPipe:
             rect = self.get_rect()
             return rect.contains(point)
         else:
-            return
+            raise
 
     def get_rect(self):
         return QtCore.QRect(self.position.x(), self.position.y(), self.size, self.size + 20)  # +20 для подписи
@@ -178,20 +179,20 @@ class DraggableObject:
 
 
 class QPump(DraggableObject):
-    def __init__(self, x, y, logic_element, process_scheme, tag='Насос'):
+    def __init__(self, x, y, logic_element, process_scheme, parent_widget, tag='Насос'):
         image_path = QtGui.QPixmap('icon/MOT_2.png')
-        super().__init__(x, y, tag=tag, image_path=image_path, logic_element=logic_element, process_scheme=process_scheme)
+        super().__init__(x, y, parent_widget, tag=tag, image_path=image_path, logic_element=logic_element, process_scheme=process_scheme)
 
 class QMov(DraggableObject):
-    def __init__(self, x, y, logic_element, process_scheme, tag='Задвижка'):
+    def __init__(self, x, y, logic_element, process_scheme, parent_widget, tag='Задвижка'):
         image_path = QtGui.QPixmap('icon/MOV_2.png')
-        super().__init__(x, y, tag=tag, image_path=image_path, logic_element=logic_element, process_scheme=process_scheme)
+        super().__init__(x, y, parent_widget, tag=tag, image_path=image_path, logic_element=logic_element, process_scheme=process_scheme)
 
 class QBoiler(DraggableObject):
-    def __init__(self, x, y, logic_element, process_scheme, tag='Котел'):
+    def __init__(self, x, y, logic_element, process_scheme, parent_widget, tag='Котел'):
         self.size = 100
         image_path = QtGui.QPixmap('icon/BOILER.png')
-        super().__init__(x, y, tag=tag, image_path=image_path, logic_element=logic_element, process_scheme=process_scheme)
+        super().__init__(x, y, parent_widget, tag=tag, image_path=image_path, logic_element=logic_element, process_scheme=process_scheme)
         self.working = False
 
     def set_working(self, state: bool):
@@ -282,9 +283,41 @@ class QPipe(DraggableObject):
                 return True
         return False
 
+    @staticmethod
+    def heuristic(x1, y1, x2, y2):
+        # Манхэттенская дистанция
+        return abs(x1 - x2) + abs(y1 - y2)
+
+    @staticmethod
+    def cell_to_point(x_idx, y_idx, min_x, min_y, grid_size):
+        return QtCore.QPoint(
+            min_x + x_idx * grid_size + grid_size,
+            min_y + y_idx * grid_size + grid_size - 20
+        )
+
+    @staticmethod
+    def get_neighbors(grid, node):
+        x, y = node
+        neighbors = []
+        for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
+            nx, ny = x + dx, y + dy
+            if 0 <= ny < len(grid) and 0 <= nx < len(grid[0]):
+                if grid[ny][nx] == 0:  # проходимо
+                    neighbors.append((nx, ny))
+        return neighbors
+
+    @staticmethod
+    def reconstruct_path(came_from, current):
+        path = [current]
+        while current in came_from:
+            current = came_from[current]
+            path.append(current)
+        path.reverse()
+        return path
+
     def __init__(self, start_point:ConnectionPoint, end_point:ConnectionPoint, start_logic, end_logic, logic_element=None,
                  process_scheme=None, parent_widget=None):
-        super().__init__(0, 0, tag='', size=0, color=QtGui.QColor(0,0,0,0))
+        super().__init__(0, 0, parent_widget, tag='', size=0, color=QtGui.QColor(0,0,0,0))
         # self.start_point = start_point
         # self.end_point = end_point
         self.sensors = []
@@ -293,7 +326,6 @@ class QPipe(DraggableObject):
         self.out_point = end_point
         self.out_point.pipe = self
         self.logic_element = logic_element
-        self.parent_widget:WidgetWithObjects = parent_widget
         self.path_points:list[QPoint] = []
         if self.logic_element and process_scheme:
             process_scheme.add_element(self.logic_element)
@@ -302,6 +334,18 @@ class QPipe(DraggableObject):
             self.logic_element.add_out_element(end_logic)
             start_logic.add_out_element(self.logic_element)
             end_logic.add_in_element(self.logic_element)
+
+    def contains(self, point, index=None):
+        for path_point in self.path_points:
+            rect = QRect(path_point.x() - 15, path_point.y() - 15, 30, 30)
+            print(rect)
+            if not index and rect.contains(point):
+                return rect.contains(point)
+            else:
+                if rect.contains(point) and rect.contains(point):
+                    return path_point
+            print(rect.contains(point))
+        return False
 
     def paint(self, painter):
         p1 = self.in_point.get_pos()
@@ -331,9 +375,9 @@ class QPipe(DraggableObject):
         grid_size = 20  # размер ячейки
         # Создаем сетку по размерам области
         min_x = 0
-        max_x = self.parent_widget.width()
+        max_x = self.parent_widget.scene_width
         min_y = 0
-        max_y = self.parent_widget.height()
+        max_y = self.parent_widget.scene_height
 
         grid_width = int((max_x - min_x) / grid_size) + 1
         grid_height = int((max_y - min_y) / grid_size) + 1
@@ -344,6 +388,11 @@ class QPipe(DraggableObject):
         # Помечаем ячейки, занятые препятствиями
         for rect in obstacles:
             if rect != self.in_point.parent and rect != self.out_point.parent:
+                 # Получаем индексы входной и выходной точки
+                in_x = int((self.in_point.get_pos().x() - min_x) / grid_size)
+                in_y = int((self.in_point.get_pos().y() - min_y) / grid_size)
+                out_x = int((self.out_point.get_pos().x() - min_x) / grid_size)
+                out_y = int((self.out_point.get_pos().y() - min_y) / grid_size)
                 # Определяем диапазон ячеек, покрывающих препятствие
                 start_x_idx = int((rect.left() - min_x) / grid_size)
                 end_x_idx = int((rect.right() - min_x) / grid_size)
@@ -351,8 +400,21 @@ class QPipe(DraggableObject):
                 end_y_idx = int((rect.bottom() - min_y) / grid_size)
                 for y in range(start_y_idx, end_y_idx + 1):
                     for x in range(start_x_idx, end_x_idx + 1):
-                        if 0 <= y < grid_height and 0 <= x < grid_width:
-                            grid[y][x] = 1  # 1 — препятствие
+                        # Не помечаем вход и выход как препятствия
+                        if (x, y) in [(in_x, in_y), (out_x, out_y)]:
+                            continue
+                        grid[y][x] = 1
+                        # ... буферные клетки, но тоже с проверкой ...
+                        if x - 1 >= 0 and (x-1, y) not in [(in_x, in_y), (out_x, out_y)]:
+                            grid[y][x - 1] = 1
+                # start_x_idx = int((rect.left() - min_x) / grid_size)
+                # end_x_idx = int((rect.right() - min_x) / grid_size)
+                # start_y_idx = int((rect.top() - min_y) / grid_size)
+                # end_y_idx = int((rect.bottom() - min_y) / grid_size)
+                # for y in range(start_y_idx, end_y_idx + 1):
+                #     for x in range(start_x_idx, end_x_idx + 1):
+                #         if 0 <= y < grid_height and 0 <= x < grid_width:
+                #             grid[y][x] = 1  # 1 — препятствие
 
         # Запускаем A* или BFS
         path_cells = self.a_star(grid, start, end, min_x, min_y, grid_size)
@@ -363,11 +425,7 @@ class QPipe(DraggableObject):
         path_points[-1] = QtCore.QPoint(path_points[-1].x() -10, path_points[-1].y())
         return path_points
 
-    def cell_to_point(self, x_idx, y_idx, min_x, min_y, grid_size):
-        return QtCore.QPoint(
-            min_x + x_idx * grid_size + grid_size,
-            min_y + y_idx * grid_size + grid_size - 20
-        )
+
 
     def a_star(self, grid, start_point, end_point, min_x, min_y, grid_size):
         """
@@ -402,28 +460,6 @@ class QPipe(DraggableObject):
                     heapq.heappush(open_set, (f_score[neighbor], neighbor))
         return []  # путь не найден
 
-    def heuristic(self, x1, y1, x2, y2):
-        # Манхэттенская дистанция
-        return abs(x1 - x2) + abs(y1 - y2)
-
-    def get_neighbors(self, grid, node):
-        x, y = node
-        neighbors = []
-        for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
-            nx, ny = x + dx, y + dy
-            if 0 <= ny < len(grid) and 0 <= nx < len(grid[0]):
-                if grid[ny][nx] == 0:  # проходимо
-                    neighbors.append((nx, ny))
-        return neighbors
-
-    def reconstruct_path(self, came_from, current):
-        path = [current]
-        while current in came_from:
-            current = came_from[current]
-            path.append(current)
-        path.reverse()
-        return path
-
     def get_rect(self):
         return self.path_points
 
@@ -436,14 +472,11 @@ class QPipe(DraggableObject):
             self.out_point = None
 
 
-class QSensor:
-    pass
-
 class QPipeIntersection(DraggableObject):
     #def __init__(self, mode='split', label=''):
-    def __init__(self, x, y, logic_element, process_scheme, tag='',
+    def __init__(self, x, y, logic_element, process_scheme, parent_widget, tag='',
                  mode='split'):
-        super().__init__(x, y, tag=tag, size=40, logic_element=logic_element, process_scheme=process_scheme)
+        super().__init__(x, y, parent_widget, tag=tag, size=40, logic_element=logic_element, process_scheme=process_scheme)
         #'icon/PipeIntersection.png'
         if mode == 'split':
             self.image = QtGui.QPixmap('icon/PipeIntersection.png')
@@ -512,6 +545,99 @@ class QPipeIntersection(DraggableObject):
             pt.i = i
             pt.paint(painter, i=i)
 
+
+class QSensor:
+    SENSOR_UNITS = {
+        "temperature": "°C",
+        "pressure": "бар",
+        "flow": "м³/ч",
+        # Добавьте другие типы по необходимости
+    }
+
+    def __init__(self, x, y, parent_widget, logic_element, process_scheme, pipe, unit=None):
+        self.position = QtCore.QPoint(x, y)
+        self.width = 110
+        self.height = 45
+        self.size = max(self.width, self.height)  # Для совместимости с логикой редактора
+        self.logic_element = logic_element
+        self.parent_widget = parent_widget
+        self.process_scheme = process_scheme
+        self.pipe:QPipe = pipe
+
+        # Автоматически определить единицу измерения, если не задана явно
+        if unit is not None:
+            self.unit = unit
+        else:
+            sensor_type = getattr(self.logic_element, "sensor_type", None)
+            self.unit = self.SENSOR_UNITS.get(sensor_type, "")
+
+
+    def get_rect(self):
+        """Возвращает QRect, занимаемый сенсором."""
+        return QtCore.QRect(self.position.x(), self.position.y(), self.width, self.height)
+
+    def contains(self, point):
+        """Проверяет, находится ли точка (QPoint) внутри сенсора."""
+        return self.get_rect().contains(point)
+
+    def get_pos(self):
+        """Возвращает позицию (левый верхний угол)."""
+        return self.position
+
+    def move_to(self, x, y):
+        """Перемещает сенсор в новую позицию."""
+        self.position = QtCore.QPoint(x, y)
+
+    def delete(self):
+        """Удаляет сенсор из редактора (если нужно)."""
+        if self in self.parent_widget.objects:
+            self.parent_widget.objects.remove(self)
+
+    def paint(self, painter):
+        # Основной прямоугольник
+        rect = QtCore.QRect(self.position.x(), self.position.y(), self.width, self.height)
+        painter.setPen(QtCore.Qt.black)
+        painter.setBrush(QtGui.QColor(240, 240, 240))
+        painter.drawRect(rect)
+
+        # Идентификатор (верхняя строка)
+        font = painter.font()
+        font.setPointSize(10)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QtCore.Qt.black)
+        sensor_id = str(getattr(self.logic_element, "index", "—"))
+        painter.drawText(
+            QtCore.QRect(self.position.x(), self.position.y(), self.width, 18),
+            QtCore.Qt.AlignCenter,
+            sensor_id
+        )
+
+        # Линия-разделитель
+        painter.drawLine(
+            self.position.x(), self.position.y() + 18,
+                               self.position.x() + self.width, self.position.y() + 18
+        )
+
+        # Значение (синим)
+        font.setPointSize(10)
+        font.setBold(False)
+        painter.setFont(font)
+        painter.setPen(QtCore.Qt.blue)
+        # Получаем значение из логического элемента
+        value = getattr(self.logic_element, "value", None)
+        if value is None and hasattr(self.logic_element, "get_value"):
+            value = self.logic_element.get_value()
+        if value is None:
+            value = "—"
+        painter.drawText(
+            QtCore.QRect(self.position.x() + 4, self.position.y() + 20, self.width - 8, 20),
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+            f"{value} {self.unit}"
+        )
+
+
+
 # --- Класс для сетки и привязки ---
 class WidgetWithObjects(QtWidgets.QWidget):
     def __init__(self, controller, process_scheme:ProcessScheme, map=None, parent=None):
@@ -533,8 +659,8 @@ class WidgetWithObjects(QtWidgets.QWidget):
         self.dragging = False
         self.drag_start_pos = None
         self.offset_at_drag_start = QtCore.QPoint(0, 0)
-        self.scene_width = 2000
-        self.scene_height = 2000
+        self.scene_width = 4000
+        self.scene_height = 4000
         self.controller.element_changed.connect(self.set_selected_element)
         self.map:MapWidget = map
 
@@ -558,9 +684,9 @@ class WidgetWithObjects(QtWidgets.QWidget):
         return scene_pos
 
     def clamp_scene_offset(self, offset):
-        # Размеры рабочей области (например, 2000x2000)
-        scene_width = 2000
-        scene_height = 2000
+        # Размеры рабочей области
+        scene_width = self.scene_width
+        scene_height = self.scene_height
 
         # Размер видимой области (размер виджета)
         view_width = self.width()
@@ -594,7 +720,8 @@ class WidgetWithObjects(QtWidgets.QWidget):
         # painter.translate(offset)
         for obj in self.objects:
             obj.paint(painter)
-            painter.drawPixmap(obj.position.x(), obj.position.y(), obj.size, obj.size, obj.image)
+            if hasattr(obj, "image") and not obj.image.isNull():
+                painter.drawPixmap(obj.position.x(), obj.position.y(), obj.size, obj.size, obj.image)
         painter.restore()
         self.map.update()
 
@@ -603,11 +730,12 @@ class WidgetWithObjects(QtWidgets.QWidget):
     def draw_grid(self, painter):
         pen = QtGui.QPen(QColor(200, 200, 200))
         painter.setPen(pen)
-        # учтите смещение при рисовании линий
-        for x in range(-self.scene_offset.x() % self.grid_size, self.width(), self.grid_size):
-            painter.drawLine(x, 0, x, self.height())
-        for y in range(-self.scene_offset.y() % self.grid_size, self.height(), self.grid_size):
-            painter.drawLine(0, y, self.width(), y)
+        # Рисуем вертикальные линии по всей сцене
+        for x in range(0, self.scene_width, self.grid_size):
+            painter.drawLine(x, 0, x, self.scene_height)
+        # Рисуем горизонтальные линии по всей сцене
+        for y in range(0, self.scene_height, self.grid_size):
+            painter.drawLine(0, y,self.scene_width, y)
 
     def snap_to_grid(self, pos):
         x = (pos.x() // self.grid_size) * self.grid_size
@@ -627,19 +755,22 @@ class WidgetWithObjects(QtWidgets.QWidget):
         result = []
         scene_pos = pos - self.scene_offset
         for obj in reversed(self.objects):
-            if type(obj.in_point) == list:
-                for x in obj.in_point:
-                    result.append(x)
+            if type(obj) ==QSensor:
+                continue
             else:
-                result.append(obj.in_point)
-            if type(obj.out_point) == list:
-                for x in obj.out_point:
-                    result.append(x)
-            else:
-                result.append(obj.out_point)
-            for point in result:
-                if point.contains(scene_pos):
-                    return point, obj
+                if type(obj.in_point) == list:
+                    for x in obj.in_point:
+                        result.append(x)
+                else:
+                    result.append(obj.in_point)
+                if type(obj.out_point) == list:
+                    for x in obj.out_point:
+                        result.append(x)
+                else:
+                    result.append(obj.out_point)
+                for point in result:
+                    if point.contains(scene_pos):
+                        return point, obj
         return None, None
 
     def mousePressEvent(self, event):
@@ -650,21 +781,33 @@ class WidgetWithObjects(QtWidgets.QWidget):
                 # Создаём объект по выбранному элементу
                 if self.selected_element == "QPump":
                     logic_obj = PumpElement()
-                    new_obj = QPump(pos.x(), pos.y(), logic_element=logic_obj, process_scheme=self.process_scheme)
+                    new_obj = QPump(pos.x(), pos.y(), parent_widget=self, logic_element=logic_obj, process_scheme=self.process_scheme)
+                elif self.selected_element == 'QSensor':
+                    scene_pos = self.pos_scene(event)
+                    for obj in reversed(self.objects):
+                        if type(obj) == QPipe:
+                            if obj.contains(scene_pos):
+                                path_point:QPoint = obj.contains(scene_pos, index=True)
+                                logic_obj = Sensor(sensor_type="P")
+                                new_obj = QSensor(path_point.x(), path_point.y(), parent_widget=self,
+                                                  logic_element=logic_obj, process_scheme=self.process_scheme, pipe=obj)
+                                break
+                        else:
+                            return
                 elif self.selected_element == "QMov":
                     logic_obj = MovElement()
-                    new_obj = QMov(pos.x(), pos.y(), logic_element=logic_obj, process_scheme=self.process_scheme)
+                    new_obj = QMov(pos.x(), pos.y(), parent_widget=self, logic_element=logic_obj, process_scheme=self.process_scheme)
                 elif self.selected_element == "QBoiler":
                     logic_obj = BoilerElement()
-                    new_obj = QBoiler(pos.x(), pos.y(), logic_element=logic_obj, process_scheme=self.process_scheme)
+                    new_obj = QBoiler(pos.x(), pos.y(), parent_widget=self, logic_element=logic_obj, process_scheme=self.process_scheme)
                 elif self.selected_element == "QPipeIntersection|Split":
                     logic_obj = PipeIntersectionElement(mode='split')
-                    new_obj = QPipeIntersection(pos.x(), pos.y(), logic_element=logic_obj, process_scheme=self.process_scheme)
+                    new_obj = QPipeIntersection(pos.x(), pos.y(), parent_widget=self, logic_element=logic_obj, process_scheme=self.process_scheme)
                 elif self.selected_element == "QPipeIntersection|Merge":
                     logic_obj = PipeIntersectionElement(mode='merge')
-                    new_obj = QPipeIntersection(pos.x(), pos.y(), logic_element=logic_obj, process_scheme=self.process_scheme, mode='merge')
+                    new_obj = QPipeIntersection(pos.x(), pos.y(), parent_widget=self, logic_element=logic_obj, process_scheme=self.process_scheme, mode='merge')
                 elif self.selected_element == "QPipe":
-                    point, obj = self.get_connection_point_at((event.pos() - self.scene_offset))
+                    point, obj = self.get_connection_point_at((self.pos_scene(event)))
                     if point and obj:
                         if not self.pipe_start_obj:
                             if point.kind == 'out':
@@ -707,7 +850,7 @@ class WidgetWithObjects(QtWidgets.QWidget):
                 self.unsetCursor()
                 self.update()
                 return
-        elif event.button() == QtCore.Qt.MiddleButton:
+        if event.button() == QtCore.Qt.MiddleButton:
             self.dragging = True
             self.drag_start_pos = event.pos()
             self.offset_at_drag_start = self.scene_offset
@@ -730,12 +873,41 @@ class WidgetWithObjects(QtWidgets.QWidget):
             new_pos = self.snap_to_grid(new_pos)
             # Ограничение по границам сцены с учетом margin
             margin = CONNECTION_MARGIN
-            max_x = self.scene_width - self.selected_object.size - margin
-            max_y = self.scene_height - self.selected_object.size - margin
+            if type(self.selected_object) == QSensor:
+                self.selected_object : QSensor
+                max_x = self.scene_width - self.selected_object.width - margin
+                max_y = self.scene_height - self.selected_object.height - margin
+            else:
+                max_x = self.scene_width - self.selected_object.size - margin
+                max_y = self.scene_height - self.selected_object.size - margin
             new_pos.setX(max(margin, min(new_pos.x(), max_x)))
             new_pos.setY(max(margin, min(new_pos.y(), max_y)))
-            self.selected_object.position = new_pos
-            self.update()
+            # Проверка на пересечение с другими объектами
+            if type(self.selected_object) == QSensor:
+                new_rect = QtCore.QRect(new_pos.x(), new_pos.y(), self.selected_object.width, self.selected_object.height)
+            else:
+                new_rect = QtCore.QRect(new_pos.x(), new_pos.y(), self.selected_object.size, self.selected_object.size)
+            min_distance = MIN_DISTANCE  # минимальное расстояние между объектами
+            can_move = True
+            for obj in self.objects:
+                if obj is self.selected_object or type(obj) == QPipe:
+                    continue
+                obj_rect = obj.get_rect()
+                rect = QtCore.QRect(obj_rect.x(), obj_rect.y(), obj_rect.width(), obj_rect.height() -20)
+                obj_rect = rect.adjusted(-min_distance, -min_distance, min_distance, min_distance)
+                if new_rect.intersects(obj_rect):
+                    can_move = False
+                    break
+            if can_move:
+                self.selected_object.position = new_pos
+                self.update()
+
+
+
+
+
+
+
             # # Перетаскивание объекта
             # scene_pos = self.pos_scene(event)
             # new_pos = scene_pos - self.offset
@@ -838,11 +1010,59 @@ class MapWidget(QtWidgets.QWidget):
         map_x = scene_point.x() * scale_x
         map_y = scene_point.y() * scale_y
         return QtCore.QPointF(map_x, map_y)
+    @staticmethod
+    def map_to_scene(map_point, scene_size, map_size):
+        """Переводит координаты с миникарты в координаты сцены."""
+        scale_x = scene_size[0] / map_size[0]
+        scale_y = scene_size[1] / map_size[1]
+        scene_x = map_point.x() * scale_x
+        scene_y = map_point.y() * scale_y
+        return QtCore.QPoint(int(scene_x), int(scene_y))
+
+    @staticmethod
+    def get_view_center(scene_offset, view_size):
+        """Вычисляет координаты центра видимой области сцены"""
+        center_x = -scene_offset.x() + view_size[0] // 2
+        center_y = -scene_offset.y() + view_size[1] // 2
+        return QtCore.QPoint(center_x, center_y)
 
     def __init__(self, redactor, parent=None):
         super().__init__(parent)
         self.redactor = redactor  # ссылка на основной виджет сцены
         self.setMinimumSize(200, 200)  # можно изменить под ваши нужды
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            map_click = event.pos()
+            # Размеры миникарты и сцены
+            map_size = (self.width(), self.height())
+            scene_size = (self.redactor.scene_width, self.redactor.scene_height)
+            view_size = (self.redactor.width(), self.redactor.height())
+
+            # Центр видимой области на миникарте
+            current_center_scene = self.get_view_center(self.redactor.scene_offset, view_size)
+            current_center_map = self.scene_to_map(current_center_scene, scene_size, map_size)
+
+            # Дельта на миникарте
+            delta_map = map_click - current_center_map
+
+            # Дельта в координатах сцены
+            scale_x = scene_size[0] / map_size[0]
+            scale_y = scene_size[1] / map_size[1]
+            delta_scene = QtCore.QPoint(int(delta_map.x() * scale_x), int(delta_map.y() * scale_y))
+
+            # Новый центр сцены
+            new_center_scene = current_center_scene + delta_scene
+
+            # Новый offset, чтобы центр оказался в нужной точке
+            new_offset = QtCore.QPoint(
+                -new_center_scene.x() + view_size[0] // 2,
+                -new_center_scene.y() + view_size[1] // 2
+            )
+            # Ограничить offset по границам сцены
+            new_offset = self.redactor.clamp_scene_offset(new_offset)
+            self.redactor.scene_offset = new_offset
+            self.redactor.update()
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
@@ -931,7 +1151,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ("QBoiler", "icon/BOILER.png"),
             ("QPipe", "icon/PIPE.png"),
             ("QPipeIntersection|Split", "icon/PipeIntersection.png"),
-            ("QPipeIntersection|Merge", "icon/PipeIntersection_merge.png")
+            ("QPipeIntersection|Merge", "icon/PipeIntersection_merge.png"),
+            ('QSensor', "icon/Sensor.png" )
         ]
         for name, icon_path in items:
             item = QtWidgets.QListWidgetItem(QtGui.QIcon(icon_path), name)
