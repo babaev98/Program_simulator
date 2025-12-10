@@ -326,7 +326,8 @@ class QPipe(DraggableObject):
         self.out_point = end_point
         self.out_point.pipe = self
         self.logic_element = logic_element
-        self.path_points:list[QPoint] = []
+        # self.path_points:list[QPoint] = []
+        self.path_points = []
         if self.logic_element and process_scheme:
             process_scheme.add_element(self.logic_element)
         if start_logic and end_logic:
@@ -335,16 +336,44 @@ class QPipe(DraggableObject):
             start_logic.add_out_element(self.logic_element)
             end_logic.add_in_element(self.logic_element)
 
+
+    def get_sensor_attach_point(self, sensor_index, total_sensors):
+        # if not self.path_points:
+        #     return None
+        # if total_sensors == 1:
+        #     idx = len(self.path_points) // 2
+        # else:
+        #     idx = int(sensor_index * (len(self.path_points) - 1) / (total_sensors - 1))
+        # return self.path_points[idx]
+        if len(self.sensors) == 1:
+            point = self.path_points[int(len(self.path_points)/2)]
+        else:
+            x = int(len(self.path_points) / len(self.sensors))
+            point = self.path_points[x * sensor_index]
+        return point
+
+
+    def find_sensor_position(self, pipe_point, parent_widget, min_distance=MIN_DISTANCE, above=True):
+        dx, dy = 0, -60 if above else 60
+        candidate = QtCore.QPoint(pipe_point.x() + dx, pipe_point.y() + dy)
+        sensor_rect = QtCore.QRect(candidate.x(), candidate.y(), 110, 45)
+        # Проверяем пересечения с другими объектами
+        for obj in parent_widget.objects:
+            if isinstance(obj, QPipe) or isinstance(obj, QSensor):
+                continue
+            obj_rect = obj.get_rect().adjusted(-min_distance, -min_distance, min_distance, min_distance)
+            if sensor_rect.intersects(obj_rect):
+                return None  # Мешает объект
+        return candidate
+
     def contains(self, point, index=None):
         for path_point in self.path_points:
             rect = QRect(path_point.x() - 15, path_point.y() - 15, 30, 30)
-            print(rect)
             if not index and rect.contains(point):
                 return rect.contains(point)
             else:
                 if rect.contains(point) and rect.contains(point):
                     return path_point
-            print(rect.contains(point))
         return False
 
     def paint(self, painter):
@@ -563,13 +592,15 @@ class QSensor:
         self.parent_widget = parent_widget
         self.process_scheme = process_scheme
         self.pipe:QPipe = pipe
-
+        self.pipe.sensors.append(self)
+        print(self.pipe.sensors)
         # Автоматически определить единицу измерения, если не задана явно
         if unit is not None:
             self.unit = unit
         else:
             sensor_type = getattr(self.logic_element, "sensor_type", None)
             self.unit = self.SENSOR_UNITS.get(sensor_type, "")
+
 
 
     def get_rect(self):
@@ -599,7 +630,18 @@ class QSensor:
         painter.setPen(QtCore.Qt.black)
         painter.setBrush(QtGui.QColor(240, 240, 240))
         painter.drawRect(rect)
-
+        # Пунктирная линия
+        if self.pipe:
+            # Найти индекс сенсора в списке трубы
+            if hasattr(self.pipe, 'sensors'):
+                idx = self.pipe.sensors.index(self)
+                total = len(self.pipe.sensors)
+                attach_point = self.pipe.get_sensor_attach_point(idx, total)
+                if attach_point:
+                    center = QtCore.QPoint(self.position.x() + self.width // 2, self.position.y() + self.height // 2)
+                    pen = QtGui.QPen(QtCore.Qt.black, 1, QtCore.Qt.DashLine)
+                    painter.setPen(pen)
+                    painter.drawLine(center, attach_point)
         # Идентификатор (верхняя строка)
         font = painter.font()
         font.setPointSize(10)
@@ -783,15 +825,48 @@ class WidgetWithObjects(QtWidgets.QWidget):
                     logic_obj = PumpElement()
                     new_obj = QPump(pos.x(), pos.y(), parent_widget=self, logic_element=logic_obj, process_scheme=self.process_scheme)
                 elif self.selected_element == 'QSensor':
+                    # scene_pos = self.pos_scene(event)
+                    # for obj in reversed(self.objects):
+                    #     if type(obj) == QPipe:
+                    #         if obj.contains(scene_pos):
+                    #             path_point:QPoint = obj.contains(scene_pos, index=True)
+                    #             logic_obj = Sensor(sensor_type="P")
+                    #             new_obj = QSensor(path_point.x(), path_point.y(), parent_widget=self,
+                    #                               logic_element=logic_obj, process_scheme=self.process_scheme, pipe=obj)
+                    #             break
                     scene_pos = self.pos_scene(event)
                     for obj in reversed(self.objects):
                         if type(obj) == QPipe:
-                            if obj.contains(scene_pos):
-                                path_point:QPoint = obj.contains(scene_pos, index=True)
-                                logic_obj = Sensor(sensor_type="P")
-                                new_obj = QSensor(path_point.x(), path_point.y(), parent_widget=self,
-                                                  logic_element=logic_obj, process_scheme=self.process_scheme, pipe=obj)
-                                break
+                            if type(obj) == QPipe:
+                                if obj.contains(scene_pos):
+                                    # Добавляем сенсор в список трубы
+                                    if not hasattr(obj, 'sensors'):
+                                        obj.sensors = []
+                                    logic_obj = Sensor(sensor_type="P")
+                                    # x = len(obj.sensors)
+                                    # obj.sensors.append(None)  # временно, чтобы узнать индекс
+                                    # sensor_index = len(obj.sensors) - 1
+                                    # total_sensors = len(obj.sensors)
+                                    # del obj.sensors[x]
+                                    # attach_point = obj.get_sensor_attach_point(sensor_index, total_sensors)
+                                    attach_point = scene_pos
+                                    # Найти позицию для сенсора (над или под трубой)
+                                    pos = obj.find_sensor_position(attach_point, self, above=True)
+                                    if pos is None:
+                                        pos = obj.find_sensor_position(attach_point, self, above=False)
+                                    if pos is None:
+                                        # Не удалось разместить сенсор
+                                        obj.sensors.pop()
+                                        return
+                                    new_obj = QSensor(pos.x(), pos.y(), parent_widget=self,
+                                                         logic_element=logic_obj, process_scheme=self.process_scheme, pipe=obj)
+                                    # obj.sensors[sensor_index] = new_obj
+                                    self.objects.append(new_obj)
+                                    self.selected_element = None
+                                    self.controller.set_element(None)
+                                    self.unsetCursor()
+                                    self.update()
+                                    break
                         else:
                             return
                 elif self.selected_element == "QMov":
@@ -948,13 +1023,14 @@ class WidgetWithObjects(QtWidgets.QWidget):
             self.remove_selected_object()
         elif event.key() == QtCore.Qt.Key_F:
             for x in self.objects:
-                print(f'Element ---------------------{x}')
-                x:DraggableObject
-                print(f'IN ---{x.in_point}')
-                print(f' in_element {x.in_point.pipe}')
-                print(f'OUT ---{x.out_point}')
-                print(f' out_element {x.out_point.pipe}')
-                print('-------------------------------------------------------------')
+                pass
+                # print(f'Element ---------------------{x}')
+                # x:DraggableObject
+                # print(f'IN ---{x.in_point}')
+                # print(f' in_element {x.in_point.pipe}')
+                # print(f'OUT ---{x.out_point}')
+                # print(f' out_element {x.out_point.pipe}')
+                # print('-------------------------------------------------------------')
                 # if type(x) == QPipe:
                 #     print(f'Element ---------------------{x}')
                 #     x:DraggableObject
