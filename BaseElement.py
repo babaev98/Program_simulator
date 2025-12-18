@@ -11,6 +11,7 @@ class ProcessScheme(QObject):
         self.next_index = 0
         self.chains = []  # Список цепей, каждая — список индексов
         self.chain_ready = False
+        self.sensors = []
 
     def remove_element(self, index):
         """Удалить элемент по индексу и обновить связи."""
@@ -49,6 +50,20 @@ class ProcessScheme(QObject):
         for start in starts:
             self._dfs_chain([start.index], set())
 
+
+    def print_chains(self):
+        print(self.chains)
+        print('----------------------------------------------------------')
+        print(self.elements_dict)
+        print('----------------------------------------------------------')
+        list_obj= list(self.elements_dict.values())
+        for obj in list_obj:
+            print(f'Элемент {obj}\nИмеет на входе:\n'
+                  f'IN --- {obj.in_elements}\n'
+                  f'А на выходе:\n'
+                  f'OUT --- {obj.out_elements}\n'
+                  f'----------------------------------------------------------')
+
     def _dfs_chain(self, path, visited):
         current_idx = path[-1]
         visited = visited | {current_idx}
@@ -78,8 +93,9 @@ class ProcessScheme(QObject):
                             r = sum(self.elements_dict[i].get_resistance() for i in chain)
                             resistances.append(r)
                 elem.set_resistances(resistances)
-        self.chain_ready = True
-        self.chain_initialized.emit()
+        if len(self.chains) != 0:
+            self.chain_ready = True
+            self.chain_initialized.emit()
 
     def calculate(self, flow=1.0):
         """Задать расход первому элементу и вызвать work() у всех элементов."""

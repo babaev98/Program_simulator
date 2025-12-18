@@ -1,10 +1,13 @@
 import os
-
+from OpenGL.GL import *
+from OpenGL.arrays import vbo
 from PyQt5 import QtCore, QtGui, QtWidgets
 import sys, heapq
+import numpy as np
+from PyQt5.QtCore import Qt, QPoint, QRect, QPointF, QTimer, pyqtSlot
+from PyQt5.QtGui import QCursor, QColor, QTransform, QIcon
+from PyQt5.QtWidgets import QOpenGLWidget, QAction
 
-from PyQt5.QtCore import Qt, QPoint, QRect
-from PyQt5.QtGui import QCursor, QColor, QTransform
 from BaseElement import *
 
 CONNECTION_MARGIN = 40
@@ -235,6 +238,53 @@ class QBoiler(DraggableObject):
         indicator_center = QtCore.QPoint(self.position.x() + self.size - indicator_radius, self.position.y() + indicator_radius)
         painter.drawEllipse(indicator_center, indicator_radius, indicator_radius)
 
+
+class PipeOpenGLWidget(QOpenGLWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.pipes = []  # список QPipe
+
+    def add_pipe(self, pipe):
+        """Добавить трубу в список для отрисовки."""
+        if pipe not in self.pipes:
+            self.pipes.append(pipe)
+        self.update()
+
+    def delete_pipe(self, pipe):
+        """Удалить трубу из списка для отрисовки."""
+        if pipe in self.pipes:
+            self.pipes.remove(pipe)
+        self.update()
+
+    def paintGL(self):
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glColor3f(0.0, 0.6, 0.0)
+        glLineWidth(8)
+        for pipe in self.pipes:
+            if not pipe.path_points:
+                continue
+            self.draw_pipe_path(pipe.path_points)
+
+    def draw_pipe_path(self, path_points):
+        """Рисует линии между точками маршрута трубы."""
+        if len(path_points) < 2:
+            return
+        glBegin(GL_LINE_STRIP)
+        for point in path_points:
+            glVertex2f(point.x(), point.y())
+        glEnd()
+
+    @staticmethod
+    def simplify_path(points, epsilon=5):
+        """
+        Статический метод для упрощения маршрута (например, Ramer–Douglas–Peucker).
+        Можно вызывать как PipeOpenGLWidget.simplify_path(points).
+        """
+        # Здесь должна быть реализация алгоритма упрощения ломаной (RDP)
+        # Для примера — просто возвращаем исходный список
+        return points
+
+
 class QPipe(DraggableObject):
     @staticmethod
     def line_intersects_rect(p1, p2, rect):
@@ -335,6 +385,7 @@ class QPipe(DraggableObject):
             self.logic_element.add_out_element(end_logic)
             start_logic.add_out_element(self.logic_element)
             end_logic.add_in_element(self.logic_element)
+        self.parent_widget.pipes.append(self)
 
 
     def get_sensor_attach_point(self, sensor_index, total_sensors):
@@ -348,8 +399,8 @@ class QPipe(DraggableObject):
         if len(self.sensors) == 1:
             point = self.path_points[int(len(self.path_points)/2)]
         else:
-            x = int(len(self.path_points) / len(self.sensors))
-            point = self.path_points[x * sensor_index]
+            x = int(len(self.path_points) / (len(self.sensors) + 1))
+            point = self.path_points[x * (sensor_index + 1)]
         return point
 
 
@@ -395,13 +446,24 @@ class QPipe(DraggableObject):
         path_points = self.build_path(p1, p2, obstacles)
         self.path_points = path_points
         # Рисуем линии между точками маршрута
-        pen = QtGui.QPen(QtCore.Qt.darkGreen, 10)
-        painter.setPen(pen)
-        for i in range(len(path_points) - 1):
-            painter.drawLine(path_points[i], path_points[i+1])
+        # pen = QtGui.QPen(QtCore.Qt.darkGreen, 10)
+        # painter.setPen(pen)
+        # for i in range(len(path_points) - 1):
+        #     painter.drawLine(path_points[i], path_points[i+1])
 
     def build_path(self, start, end, obstacles):
-        grid_size = 20  # размер ячейки
+        # Вычисляем расстояние между концами трубы
+        distance = (start - end).manhattanLength()
+        # Динамически выбираем размер сетки
+        # if distance < 2000:
+        #     grid_size = 20
+        # elif distance < 3000:
+        #     grid_size = 40
+        # elif distance < 4000:
+        #     grid_size = 80
+        # else:
+        #     grid_size = 120
+        grid_size = 20
         # Создаем сетку по размерам области
         min_x = 0
         max_x = self.parent_widget.scene_width
@@ -449,45 +511,86 @@ class QPipe(DraggableObject):
         path_cells = self.a_star(grid, start, end, min_x, min_y, grid_size)
         # Преобразуем ячейки в точки
         path_points = [self.cell_to_point(x, y, min_x, min_y, grid_size) for x, y in path_cells]
-        path_points.insert(1, path_points[0])
-        path_points[0] = QtCore.QPoint(path_points[0].x() -10, path_points[0].y())
-        path_points[-1] = QtCore.QPoint(path_points[-1].x() -10, path_points[-1].y())
+        path_points.insert(0, start)
+        # path_points[0] = QtCore.QPoint(path_points[0].x() -10, path_points[0].y())
+        # path_points[-1] = QtCore.QPoint(path_points[-1].x() -10, path_points[-1].y())
+        path_points[-1] = end
         return path_points
 
 
 
     def a_star(self, grid, start_point, end_point, min_x, min_y, grid_size):
-        """
-        grid: 2D список, где 0 — проходимо, 1 — препятствие
-        start_point, end_point: QPoint — начальная и конечная точки
-        min_x, min_y: минимальные координаты области
-        grid_size: размер ячейки
-        """
-        start_x = int((start_point.x() - min_x) / grid_size)
-        start_y = int((start_point.y() - min_y) / grid_size)
-        end_x = int((end_point.x() - min_x) / grid_size)
-        end_y = int((end_point.y() - min_y) / grid_size)
+        from collections import deque
 
-        open_set = []
-        heapq.heappush(open_set, (0, (start_x, start_y)))
-        came_from = {}
-        g_score = { (start_x, start_y): 0 }
-        f_score = { (start_x, start_y): self.heuristic(start_x, start_y, end_x, end_y) }
+        def to_grid(p):
+            x = int((p.x() - min_x) / grid_size)
+            y = int((p.y() - min_y) / grid_size)
+            return x, y
 
-        while open_set:
-            current_f, current = heapq.heappop(open_set)
-            if current == (end_x, end_y):
-                return self.reconstruct_path(came_from, current)
+        start = to_grid(start_point)
+        end = to_grid(end_point)
 
-            neighbors = self.get_neighbors(grid, current)
-            for neighbor in neighbors:
-                tentative_g = g_score[current] + 1  # стоимость перехода (можно усложнить)
-                if neighbor not in g_score or tentative_g < g_score[neighbor]:
-                    came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g
-                    f_score[neighbor] = tentative_g + self.heuristic(neighbor[0], neighbor[1], end_x, end_y)
-                    heapq.heappush(open_set, (f_score[neighbor], neighbor))
-        return []  # путь не найден
+        # Прямое и обратное направления
+        open_fwd = []
+        open_bwd = []
+        heapq.heappush(open_fwd, (0, start))
+        heapq.heappush(open_bwd, (0, end))
+        came_from_fwd = {}
+        came_from_bwd = {}
+
+        g_fwd = {start: 0}
+        g_bwd = {end: 0}
+
+        closed_fwd = set()
+        closed_bwd = set()
+
+        meeting = None
+
+        while open_fwd and open_bwd:
+            # Шаг вперед из старта
+            _, current_fwd = heapq.heappop(open_fwd)
+            closed_fwd.add(current_fwd)
+
+            for neighbor in self.get_neighbors(grid, current_fwd):
+                if neighbor in closed_fwd:
+                    continue
+                tentative_g = g_fwd[current_fwd] + 1
+                if neighbor not in g_fwd or tentative_g < g_fwd[neighbor]:
+                    came_from_fwd[neighbor] = current_fwd
+                    g_fwd[neighbor] = tentative_g
+                    heapq.heappush(open_fwd, (tentative_g + self.heuristic(neighbor[0], neighbor[1], end[0], end[1]), neighbor))
+                if neighbor in closed_bwd:
+                    meeting = neighbor
+                    break
+            if meeting:
+                break
+
+            # Шаг назад из финиша
+            _, current_bwd = heapq.heappop(open_bwd)
+            closed_bwd.add(current_bwd)
+
+            for neighbor in self.get_neighbors(grid, current_bwd):
+                if neighbor in closed_bwd:
+                    continue
+                tentative_g = g_bwd[current_bwd] + 1
+                if neighbor not in g_bwd or tentative_g < g_bwd[neighbor]:
+                    came_from_bwd[neighbor] = current_bwd
+                    g_bwd[neighbor] = tentative_g
+                    heapq.heappush(open_bwd, (tentative_g + self.heuristic(neighbor[0], neighbor[1], start[0], start[1]), neighbor))
+                if neighbor in closed_fwd:
+                    meeting = neighbor
+                    break
+            if meeting:
+                break
+
+        # Если встреча найдена
+        if meeting:
+            path_fwd = self.reconstruct_path(came_from_fwd, meeting)
+            path_bwd = self.reconstruct_path(came_from_bwd, meeting)
+            path_bwd = path_bwd[::-1]
+            full_path = path_fwd + path_bwd[1:]  # убрать дублирование meeting
+            return full_path
+        return []  # нет маршрута
 
     def get_rect(self):
         return self.path_points
@@ -499,6 +602,11 @@ class QPipe(DraggableObject):
         if self.out_point != None:
             self.out_point.pipe = None
             self.out_point = None
+        if len(self.sensors) != 0:
+            for sensor in self.sensors:
+                sensor.delete()
+            self.sensors = []
+        self.parent_widget.pipes.remove(self)
 
 
 class QPipeIntersection(DraggableObject):
@@ -588,12 +696,14 @@ class QSensor:
         self.width = 110
         self.height = 45
         self.size = max(self.width, self.height)  # Для совместимости с логикой редактора
-        self.logic_element = logic_element
-        self.parent_widget = parent_widget
         self.process_scheme = process_scheme
         self.pipe:QPipe = pipe
         self.pipe.sensors.append(self)
-        print(self.pipe.sensors)
+        self.logic_element:Sensor = logic_element
+        self.process_scheme.sensors.append(self.logic_element)
+        self.pipe.logic_element.sensors.append(self.logic_element)
+        self.value = 0
+        self.parent_widget = parent_widget
         # Автоматически определить единицу измерения, если не задана явно
         if unit is not None:
             self.unit = unit
@@ -601,7 +711,11 @@ class QSensor:
             sensor_type = getattr(self.logic_element, "sensor_type", None)
             self.unit = self.SENSOR_UNITS.get(sensor_type, "")
 
+        #asd
 
+
+    def work(self):
+        self.value = self.logic_element.value
 
     def get_rect(self):
         """Возвращает QRect, занимаемый сенсором."""
@@ -681,7 +795,7 @@ class QSensor:
 
 
 # --- Класс для сетки и привязки ---
-class WidgetWithObjects(QtWidgets.QWidget):
+class WidgetWithObjects(QtWidgets.QOpenGLWidget):
     def __init__(self, controller, process_scheme:ProcessScheme, map=None, parent=None):
         super().__init__(parent)
         self.process_scheme = process_scheme
@@ -705,21 +819,7 @@ class WidgetWithObjects(QtWidgets.QWidget):
         self.scene_height = 4000
         self.controller.element_changed.connect(self.set_selected_element)
         self.map:MapWidget = map
-
-        # Скролл
-        # self.setViewportMargins(0, 0, 0, 0)
-        # self.horizontalScrollBar().setRange(0, self.scene_width - self.viewport().width())
-        # self.verticalScrollBar().setRange(0, self.scene_height - self.viewport().height())
-        # self.horizontalScrollBar().valueChanged.connect(self.update)
-        # self.verticalScrollBar().valueChanged.connect(self.update)
-
-
-    # def resizeEvent(self, event):
-    #     self.horizontalScrollBar().setPageStep(self.viewport().width())
-    #     self.verticalScrollBar().setPageStep(self.viewport().height())
-    #     self.horizontalScrollBar().setRange(0, self.scene_width - self.viewport().width())
-    #     self.verticalScrollBar().setRange(0, self.scene_height - self.viewport().height())
-    #     super().resizeEvent(event)
+        self.pipes = []
 
     def pos_scene(self, event):
         scene_pos = event.pos() - self.scene_offset
@@ -751,23 +851,37 @@ class WidgetWithObjects(QtWidgets.QWidget):
         else:
             self.unsetCursor()
 
-    def paintEvent(self, event):
+    def paintGL(self):
+        glClearColor(1.0, 1.0, 1.0, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glColor3f(0.0, 0.6, 0.0)
+        glLineWidth(8)
+        self.map.update()
+        if len(self.pipes) != 0:
+            for pipe in self.pipes:
+                if len(pipe.path_points) < 2:
+                    continue
+                glMatrixMode(GL_PROJECTION)
+                glLoadIdentity()
+                glOrtho(0, self.width(), self.height(), 0, -1, 1)
+                glMatrixMode(GL_MODELVIEW)
+                glLoadIdentity()
+                glBegin(GL_LINE_STRIP)
+                for point in pipe.path_points:
+                    if (0-self.scene_offset.x() < point.x() < self.width() - self.scene_offset.x() and
+                            0-self.scene_offset.y() < point.y() < self.height() - self.scene_offset.y()):
+                        glVertex2f(point.x() + self.scene_offset.x(), point.y() + self.scene_offset.y())
+                glEnd()
+
         painter = QtGui.QPainter(self)
         painter.save()
         painter.translate(self.scene_offset)
         self.draw_grid(painter)
-        # Смещение сцены по скроллбару
-        # offset = QtCore.QPoint(-self.horizontalScrollBar().value(), -self.verticalScrollBar().value())
-        # painter.save()
-        # painter.translate(offset)
         for obj in self.objects:
             obj.paint(painter)
             if hasattr(obj, "image") and not obj.image.isNull():
                 painter.drawPixmap(obj.position.x(), obj.position.y(), obj.size, obj.size, obj.image)
         painter.restore()
-        self.map.update()
-
-            # obj.paint(painter)
 
     def draw_grid(self, painter):
         pen = QtGui.QPen(QColor(200, 200, 200))
@@ -861,14 +975,14 @@ class WidgetWithObjects(QtWidgets.QWidget):
                                     new_obj = QSensor(pos.x(), pos.y(), parent_widget=self,
                                                          logic_element=logic_obj, process_scheme=self.process_scheme, pipe=obj)
                                     # obj.sensors[sensor_index] = new_obj
-                                    self.objects.append(new_obj)
+                                    # self.objects.append(new_obj)
                                     self.selected_element = None
                                     self.controller.set_element(None)
                                     self.unsetCursor()
                                     self.update()
                                     break
                         else:
-                            return
+                            continue
                 elif self.selected_element == "QMov":
                     logic_obj = MovElement()
                     new_obj = QMov(pos.x(), pos.y(), parent_widget=self, logic_element=logic_obj, process_scheme=self.process_scheme)
@@ -897,8 +1011,9 @@ class WidgetWithObjects(QtWidgets.QWidget):
                                 end_logic = self.pipe_end_obj.logic_element
                                 logic_obj = PipeElementElement(length=1.0, diameter=0.1)
                                 new_pipe = QPipe(self.pipe_start_point, self.pipe_end_point, start_logic, end_logic,
-                                                 logic_element=logic_obj, process_scheme=self.process_scheme,
-                                                 parent_widget=self)
+                                                 logic_element=logic_obj,
+                                                 process_scheme=self.process_scheme, parent_widget=self)
+
                                 self.objects.append(new_pipe)
                                 self.pipe_start_obj = None
                                 self.pipe_end_obj = None
@@ -1022,6 +1137,7 @@ class WidgetWithObjects(QtWidgets.QWidget):
         elif event.key() == QtCore.Qt.Key_D:
             self.remove_selected_object()
         elif event.key() == QtCore.Qt.Key_F:
+            self.process_scheme.print_chains()
             for x in self.objects:
                 pass
                 # print(f'Element ---------------------{x}')
@@ -1072,6 +1188,20 @@ class WidgetWithObjects(QtWidgets.QWidget):
                             self.objects.remove(rem_obj)
                     break
         self.update()
+
+    @staticmethod
+    def paint_pipe(path_points):
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glColor3f(0.0, 0.6, 0.0)
+        glLineWidth(8)
+        if len(path_points) < 2:
+            return
+        glBegin(GL_LINE_STRIP)
+        for point in path_points:
+            glVertex2f(point.x(), point.y())
+        glEnd()
+
+
 
 class MapWidget(QtWidgets.QWidget):
     @staticmethod
@@ -1185,13 +1315,67 @@ class MapWidget(QtWidgets.QWidget):
         # Пример: рисуем все объекты как точки на миникарте
         if len(self.redactor.objects) != 0:
             for obj in self.redactor.objects:
-                if type(obj) != QPipe:
+                if type(obj) == QPipe:
+                    # pass
+                    pen = QtGui.QPen(QtCore.Qt.darkGreen, 1)
+                    painter.setPen(pen)
+                    for i in range(len(obj.path_points) - 1):
+                        map_pos = self.scene_to_map(obj.path_points[i],
+                                                    (self.redactor.scene_width, self.redactor.scene_height),
+                                                    (self.width(), self.height()))
+                        map_pos = QPointF(map_pos.x(), map_pos.y()-1.5)
+
+                        map_pos2 = self.scene_to_map(obj.path_points[i+1],
+                                                     (self.redactor.scene_width, self.redactor.scene_height),
+                                                     (self.width(), self.height()))
+                        map_pos2 = QPointF(map_pos2.x(), map_pos2.y()-1.5)
+                        painter.drawLine(map_pos, map_pos2)
+                elif type(obj) == QSensor:
+                    map_pos = self.scene_to_map(obj.position,
+                                                (self.redactor.scene_width, self.redactor.scene_height),
+                                                (self.width(), self.height()))
+                    painter.setPen(QtCore.Qt.red)
+                    painter.setBrush(QtCore.Qt.red)
+                    painter.drawEllipse(map_pos, 1, 1)
+                else:
                     map_pos = self.scene_to_map(obj.position,
                                                 (self.redactor.scene_width, self.redactor.scene_height),
                                                 (self.width(), self.height()))
                     painter.setPen(QtCore.Qt.blue)
                     painter.setBrush(QtCore.Qt.blue)
-                    painter.drawEllipse(map_pos, 3, 3)
+                    painter.drawEllipse(map_pos, 2, 2)
+
+
+class ControlMenu(QtWidgets.QToolBar):
+    def __init__(self,name, parent_widget):
+        super().__init__(name, parent_widget)
+        self.setMinimumHeight(20)
+        self.setMaximumHeight(20)
+        self.setStyleSheet("background-color: rgb(177, 177, 177);")
+        self.parent_widget = parent_widget
+        # self.setAllowedAreas(QtCore.Qt.TopDockWidgetArea)
+        self.action1 = QAction(QIcon("icon/init_on.png" if self.parent_widget.process_scheme.chain_ready else "icon/init_off.png"), "Инструмент 1", self)
+        self.action2 = QAction(QIcon("icon/def.png"), "Инструмент 2", self)
+        self.action3 = QAction(QIcon("icon/def.png"), "Инструмент 3", self)
+
+        self.addAction(self.action1)
+        self.addAction(self.action2)
+        self.addAction(self.action3)
+
+        self.action1.triggered.connect(self.action1_clicked)
+
+    @pyqtSlot()
+    def action1_clicked(self):
+        if not self.parent_widget.process_scheme.chain_ready:
+            self.parent_widget.process_scheme.initialize_chains()
+
+
+
+    def addAction(self, action):
+        super().addAction(action)
+        self.addSeparator()
+
+
 
 # --- Основная часть ---
 class MainWindow(QtWidgets.QMainWindow):
@@ -1212,6 +1396,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.mapWidget.setWidget(self.mapWidgetContents)
         self.redactor.map = self.mapWidgetContents
+
+        self.control_menu = ControlMenu('',self)
+        self.addToolBar(self.control_menu)
 
 
         # Настройка элементов для выбора
@@ -1241,9 +1428,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mapWidget.resize(220, 100)
 
         self.resizeDocks([self.mapWidget, self.dockWidget], [200, 300], QtCore.Qt.Vertical)
+
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.update_sensors)
+        self.update_timer.start(500)  # обновлять каждые 500 мс (0.5 сек)
+
+
+    def update_sensors(self):
+        for obj in self.redactor.objects:
+            if isinstance(obj, QSensor):
+                obj.work()
+        self.redactor.update()  # перерисовать сцену, если нужно
+
+        self.control_menu.action1.setIcon(QIcon("icon/init_on.png" if self.process_scheme.chain_ready else "icon/init_off.png"))
+
+
     def item_changed(self, current, previous):
         if current:
             self.controller.set_element(current.text())
+
 
 # --- Запуск ---
 if __name__ == "__main__":
