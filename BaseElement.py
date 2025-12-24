@@ -18,14 +18,14 @@ class ProcessScheme(QObject):
         if index in self.elements_dict:
             # Удалить связи у других элементов
             for elem in self.elements_dict.values():
-                if index in elem.in_indices:
-                    elem.in_indices.remove(index)
-                if index in elem.out_indices:
-                    elem.out_indices.remove(index)
+                if self.elements_dict[index] in elem.in_elements:
+                    elem.in_elements.remove(self.elements_dict[index])
+                if self.elements_dict[index] in elem.out_elements:
+                    elem.out_elements.remove(self.elements_dict[index])
             # Удалить сам элемент
             del self.elements_dict[index]
             self.chain_ready = False
-            self.chain_not_initialized.emit()
+            # self.chain_not_initialized.emit()
 
     def add_element(self, element):
         element.index = self.next_index
@@ -43,37 +43,70 @@ class ProcessScheme(QObject):
         """Найти все элементы FlowSourceElement как начало цепей."""
         return [e for e in self.elements_dict.values() if isinstance(e, FlowSourceElement)]
 
+    # def build_chains(self):
+    #     """Построить все возможные цепи (пути) от FlowSourceElement до стоков."""
+    #     self.chains = []
+    #     starts = self.find_start_elements()
+    #     for start in starts:
+    #         self._dfs_chain([start], set())
     def build_chains(self):
-        """Построить все возможные цепи (пути) от FlowSourceElement до стоков."""
+        """Построить все цепи как простые пути по out_elements."""
         self.chains = []
         starts = self.find_start_elements()
+        visited_global = set()  # опционально, чтобы не стартовать из явно «внутренних» узлов
         for start in starts:
-            self._dfs_chain([start.index], set())
-
+            self._dfs_chain(path=[start], visited=set(), start_node=start)
+        # chains теперь содержит списки индексов
 
     def print_chains(self):
         print(self.chains)
+        print('----------------------------------------------------------')
+        print("CHAINS:")
+        for c in self.chains:
+            print("  ", c)
         print('----------------------------------------------------------')
         print(self.elements_dict)
         print('----------------------------------------------------------')
         list_obj= list(self.elements_dict.values())
         for obj in list_obj:
-            print(f'Элемент {obj}\nИмеет на входе:\n'
+            print(f'Элемент {obj} -- Индекс {obj.index}\nИмеет на входе:\n'
                   f'IN --- {obj.in_elements}\n'
                   f'А на выходе:\n'
                   f'OUT --- {obj.out_elements}\n'
                   f'----------------------------------------------------------')
 
-    def _dfs_chain(self, path, visited):
-        current_idx = path[-1]
-        visited = visited | {current_idx}
-        current_elem = self.elements_dict[current_idx]
-        if not current_elem.out_indices:
-            self.chains.append(list(path))
+    # def _dfs_chain(self, path, visited):
+    #     current_idx = path[-1]
+    #     visited = visited | {current_idx}
+    #     current_elem = self.elements_dict[current_idx]
+    #     if not current_elem.out_indices:
+    #         self.chains.append(list(path))
+    #         return
+    #     for next_idx in current_elem.out_indices:
+    #         if next_idx not in visited:
+    #             self._dfs_chain(path + [next_idx], visited)
+    def _dfs_chain(self, path, visited, start_node):
+        current = path[-1]
+        visited = visited | {current}
+        out_elems = getattr(current, "out_elements", [])
+
+        # Кандидаты для продолжения — только непосещённые в этом пути
+        next_candidates = [e for e in out_elems if e not in visited]
+
+        # --- Условие конца цепи ---
+        # 1) Нет куда идти дальше (next_candidates пуст)
+        #    - это может быть конечный элемент,
+        #    - или точка, где дальше только уже посещённые (замкнули кольцо).
+        if not next_candidates:
+            # Дополнительно: если хотите явно обрабатывать замыкание на старте
+            # можно проверить, есть ли среди out_elems start_node или какой-то
+            # другой особый тип "стока".
+            self.chains.append([e.index for e in path])
             return
-        for next_idx in current_elem.out_indices:
-            if next_idx not in visited:
-                self._dfs_chain(path + [next_idx], visited)
+
+        # --- Продолжаем по ветвям ---
+        for next_elem in next_candidates:
+            self._dfs_chain(path + [next_elem], visited, start_node)
 
     def initialize_chains(self, p0=1.0, t0=20.0):
         """Присвоить давление и температуру первым элементам цепей, рассчитать сопротивления ветвей."""
@@ -99,12 +132,13 @@ class ProcessScheme(QObject):
 
     def calculate(self, flow=1.0):
         """Задать расход первому элементу и вызвать work() у всех элементов."""
-        if self.chains and self.chains[0]:
-            first_elem = self.elements_dict[self.chains[0][0]]
-            if hasattr(first_elem, 'set_flow'):
-                first_elem.set_flow(flow)
-        for idx in self.elements_dict:
-            self.elements_dict[idx].work()
+        if self.chain_ready:
+            if self.chains and self.chains[0]:
+                first_elem = self.elements_dict[self.chains[0][0]]
+                if hasattr(first_elem, 'set_flow'):
+                    first_elem.set_flow(flow)
+            for idx in self.elements_dict:
+                self.elements_dict[idx].work()
 
 
 '''
@@ -122,6 +156,7 @@ class BaseElement:#Базовый элемент
 
     def __init__(self, in_indices=None, resistance:float=None):
         self.index = None  # Уникальный индекс, присваивается схемой
+        self.tag = None
         self.in_indices = in_indices if in_indices is not None else []  # индексы входных элементов
         self.out_indices = []  # индексы выходных элементов (заполняются схемой)
         self.in_elements = []
@@ -185,6 +220,39 @@ class BaseElement:#Базовый элемент
     def depressurization(self, breach_percent=None):
         pass
 
+    def get_parameters(self) -> dict:
+        parameters = {
+            'object' : {
+                'object' : {
+                    'value' : self,
+                    'type' : 'str',
+                    'label' : 'Имя экземпляра'
+                },
+                'tag' : {
+                    'value' : self.tag,
+                    'type' : 'str',
+                    'label' : 'Тег'
+                },
+                'index' : {
+                    'value' : self.index,
+                    'type' : 'int',
+                    'label' : 'Индекс'
+                }
+            },
+            'tag' : {
+                'value' : self.tag,
+                'type' : 'str',
+                'label' : 'Тег'
+            },
+            'resistance' : {
+                'value' : self._resistance,
+                "type": "float",
+                "min": 0.0,
+                "max": 1.0,
+                "label": "Гидр. сопротивление"
+            }
+        }
+        return parameters
 
 class FlowSourceElement(BaseElement):
     """
@@ -214,6 +282,7 @@ class Sensor:
         self.sensor_type = sensor_type
         self.value = None
         self.index = None
+        self.tag = None
 
     def update(self, value, rattle_range=0.0):
         # Обновить значение с учетом дребезга
@@ -225,6 +294,33 @@ class Sensor:
     def get(self):
         return self.value
 
+    def get_parameters(self) -> dict:
+        parameters = {
+            'object' : {
+                'object' : {
+                    'value' : self,
+                    'type' : 'str',
+                    'label' : 'Имя экземпляра'
+                },
+                'tag' : {
+                    'value' : self.tag,
+                    'type' : 'str',
+                    'label' : 'Тег'
+                },
+                'index' : {
+                    'value' : self.index,
+                    'type' : 'int',
+                    'label' : 'Индекс'
+                }
+            },
+            'sensor_type' : {
+                "value": self.sensor_type,
+                "type": "choice",
+                "choices": ["pressure", "temperature", "flow"],
+                "label": "Тип датчика"
+            }
+        }
+        return parameters
 
 class PipeElementElement(BaseElement):
     """
@@ -238,6 +334,38 @@ class PipeElementElement(BaseElement):
         self.breach = False
         self.breach_percent = 0.0
 
+    def get_parameters(self) -> dict:
+        super_parameters = super().get_parameters()
+        parameters = {
+            'length' : {
+                'value' : self.length,
+                "type": "float",
+                "min": 0.0,
+                "max": 9999999.0,
+                "label": "Длина трубы"
+            },
+            'diameter' : {
+                'value' : self.diameter,
+                "type": "float",
+                "min": 0.0,
+                "max": 1000.0,
+                "label": "Диаметр трубы"
+            },
+            'breach' : {
+                'value' : self.breach,
+                'type' : 'bool',
+                'label' : 'Прорыв'
+            },
+            'breach_percent' : {
+                'value' : self.breach_percent,
+                "type": "float",
+                "min": 0.0,
+                "max": 100.0,
+                "label": "Прорыв процент"
+            }
+        }
+        parameters.update(super_parameters)
+        return parameters
 
     def add_sensor(self, sensor):
         self.sensors.append(sensor)
@@ -423,6 +551,14 @@ class FilterElement(BaseElement):
         super().__init__(resistance=base_resistance)
         self.clog_factor = clog_factor  # 1.0 — чистый, >1.0 — грязный
 
+    def get_parameters(self) -> dict:
+        super_parameters = super().get_parameters()
+        parameters = {
+            'clog_factor' : self.clog_factor
+        }
+        parameters.update(super_parameters)
+        return parameters
+
     def get_resistance(self):
         # Сопротивление фильтра зависит от степени загрязнения
         return self.resistance * self.clog_factor
@@ -453,8 +589,34 @@ class PumpElement(BaseElement):
     def __init__(self, max_pressure=0.5):
         super().__init__()
         self.status = False      # Включён/выключен
-        self.power = 0.0         # Мощность (0...1)
+        self.power = 0.0         # Мощность (0...100)
         self.max_pressure = max_pressure  # Максимальный напор (например, бар)        # Расход будет рассчитан схемой
+
+    def get_parameters(self) -> dict:
+        super_parameters = super().get_parameters()
+        parameters = {
+            'status' : {
+                'value' : self.status,
+                'type' : 'bool',
+                'label' : 'Вкл/Выкл'
+            },
+            'power' : {
+                'value' : self.power,
+                "type": "float",
+                "min": 0.0,
+                "max": 100.0,
+                "label": "Мощность"
+            },
+            'max_pressure' : {
+                'value' : self.max_pressure,
+                "type": "float",
+                "min": 0.0,
+                "max": 10.0,
+                "label": "Максимальный напор"
+            }
+        }
+        parameters.update(super_parameters)
+        return parameters
 
     def set_status(self, status: bool):
         self.status = status
@@ -477,9 +639,38 @@ class MovElement(BaseElement):
     """
     def __init__(self, in_elements=None, resistance_open=0.05, resistance_closed=1000.0):
         super().__init__(in_elements)
-        self.position = 1.0  # 1.0 — полностью открыт, 0.0 — полностью закрыт
+        self.position = 100.0  # 100.0 — полностью открыт, 0.0 — полностью закрыт
         self.resistance_open = resistance_open
         self.resistance_closed = resistance_closed
+
+    def get_parameters(self) -> dict:
+        super_parameters = super().get_parameters()
+        parameters = {
+            'position' : {
+                'value' : self.position,
+                "type": "float",
+                "min": 0.0,
+                "max": 100.0,
+                "label": "Процент открытия"
+            },
+            'resistance_open' : {
+                'value' : self.resistance_open,
+                "type": "float",
+                "min": 0.0,
+                "max": 1.0,
+                "label": "Сопротивление при открытом положении"
+            },
+            'resistance_closed' : {
+                'value' : self.resistance_closed,
+                "type": "float",
+                "min": 0.0,
+                "max": 1.0,
+                "label": "Сопротивление при закрытом положении"
+            }
+        }
+        parameters.update(super_parameters)
+        return parameters
+
 
     @property
     def resistance(self):
@@ -517,6 +708,34 @@ class ValveElement(BaseElement):
         self.resistance_open = resistance_open
         self.resistance_closed = resistance_closed
 
+    def get_parameters(self) -> dict:
+        super_parameters = super().get_parameters()
+        parameters = {
+            'opening' : {
+                'value' : self.opening,
+                "type": "float",
+                "min": 0.0,
+                "max": 100.0,
+                "label": "Процент открытия"
+            },
+            'resistance_open' : {
+                'value' : self.resistance_open,
+                "type": "float",
+                "min": 0.0,
+                "max": 1.0,
+                "label": "Сопротивление при открытом положении"
+            },
+            'resistance_closed' : {
+                'value' : self.resistance_closed,
+                "type": "float",
+                "min": 0.0,
+                "max": 1.0,
+                "label": "Сопротивление при закрытом положении"
+            }
+        }
+        parameters.update(super_parameters)
+        return parameters
+
     @property
     def resistance(self):
         # Сопротивление зависит от открытия
@@ -550,9 +769,37 @@ class CapacityElement(BaseElement):
         self.out_elements = [None] * num_out
         self.volume = volume          # Объём ёмкости, м3
         self.tank_area = tank_area    # Площадь сечения, м2
-        self.level = 0.0              # Уровень жидкости, м
+        self.level = 0.0              # Уровень жидкости, %
         self.t_capacity = 20.0        # Температура в ёмкости, °C
         self.p_capacity = 0.1         # Давление в ёмкости, МПа
+
+    def get_parameters(self) -> dict:
+        super_parameters = super().get_parameters()
+        parameters = {
+            'volume' : {
+                'value' : self.volume,
+                "type": "float",
+                "min": 0.0,
+                "max": 1000.0,
+                "label": "Объем емкости"
+            },
+            'tank_area' : {
+                'value' : self.tank_area,
+                "type": "float",
+                "min": 0.0,
+                "max": 1000.0,
+                "label": "Площадь сечения"
+            },
+            'level' : {
+                'value' : self.level,
+                "type": "float",
+                "min": 0.0,
+                "max": 100.0,
+                "label": "Уровень емкости"
+            }
+        }
+        parameters.update(super_parameters)
+        return parameters
 
     def set_in_element(self, idx, element):
         if 0 <= idx < self.num_in:
@@ -635,9 +882,49 @@ class BoilerElement(BaseElement):
         super().__init__()
         self._max_power_mw = max_power_mw
         self._min_power_percent = min_power_percent  # Минимальный процент мощности (0...1)
-        self._power_percent = 0.0  # Текущий процент мощности (0...1)
+        self._power_percent = 0.0  # Текущий процент мощности (0...100)
         self._status = False
         self._resistance = resistance
+
+    def get_parameters(self) -> dict:
+        super_parameters = super().get_parameters()
+        parameters = {
+            'max_power_mw' : {
+                'value' : self._max_power_mw,
+                "type": "float",
+                "min": 0.0,
+                "max": 1000.0,
+                "label": "Максимальная мощность"
+            },
+            'min_power_percent' : {
+                'value' : self._min_power_percent,
+                "type": "float",
+                "min": 0.0,
+                "max": 100.0,
+                "label": "Минимальный процент мощности"
+            },
+            'power_percent' : {
+                'value' : self._power_percent,
+                "type": "float",
+                "min": 0.0,
+                "max": 100.0,
+                "label": "Текущий процент мощности"
+            },
+            'status' : {
+                'value' : self._status,
+                'type' : 'bool',
+                'label' : 'Вкл/Выкл'
+            },
+            'resistance' : {
+                'value' : self._resistance,
+                "type": "float",
+                "min": 0.0,
+                "max": 1000.0,
+                "label": "Сопротивление"
+            }
+        }
+        parameters.update(super_parameters)
+        return parameters
 
     # --- Геттеры и сеттеры ---
     def get_max_power(self):
@@ -699,6 +986,27 @@ class ThermalFluidElement(BaseElement):
         super().__init__(in_elements)
         self._heat_demand = heat_demand      # МВт
         self._resistance = resistance
+
+    def get_parameters(self) -> dict:
+        super_parameters = super().get_parameters()
+        parameters = {
+            'heat_demand' : {
+                'value' : self._heat_demand,
+                "type": "float",
+                "min": 0.0,
+                "max": 1000.0,
+                "label": "Теплосьем МВт"
+            },
+            'resistance' : {
+                'value' : self._resistance,
+                "type": "float",
+                "min": 0.0,
+                "max": 1000.0,
+                "label": "Сопротивление"
+            }
+        }
+        parameters.update(super_parameters)
+        return parameters
 
     def get_heat_demand(self):
         return self._heat_demand

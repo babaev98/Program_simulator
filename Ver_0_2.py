@@ -86,15 +86,25 @@ class ConnectionPoint:
 
 class ElementController(QtCore.QObject):
     element_changed = QtCore.pyqtSignal(str)
+    settings_object_changed = QtCore.pyqtSignal(object)
     def __init__(self):
         super().__init__()
         self._selected_element = None
-    def set_element(self, name):
+        self._selected_settings_element = None
+
+    def set_element(self, name:str):
         self._selected_element = name
         self.element_changed.emit(name)
+
+    def set_settings_object(self, obj:object):
+        self._selected_settings_element = obj
+        self.settings_object_changed.emit(obj)
+
     def get_element(self):
         return self._selected_element
 
+    def get_settings_object(self):
+        return self._selected_settings_element
 
 class DraggableObject:
     @staticmethod
@@ -129,6 +139,8 @@ class DraggableObject:
         self.in_point = ConnectionPoint(self, 'in')
         self.out_point = ConnectionPoint(self, 'out')
         self.parent_widget:WidgetWithObjects = parent_widget
+        self.process_scheme = process_scheme
+        self.model = ModelSettings(self)
 
     def contains(self, point):
         if type(self) != QPipe:
@@ -169,6 +181,10 @@ class DraggableObject:
         if hasattr(self, "out_point") and self.out_point:
             self.out_point.paint(painter)
 
+    def get_parameters(self):
+        parameters = self.model.get_parameters()
+        return parameters
+
     def delete(self):
         result = []
         if self.in_point.pipe != None:
@@ -177,18 +193,24 @@ class DraggableObject:
         if self.out_point.pipe != None:
             result.append(self.out_point.pipe)
             self.out_point.pipe.delete()
+        self.process_scheme.remove_element(self.logic_element.index)
         return result
 
 
+class QFlowSource(DraggableObject):
+
+    def __init__(self, x, y, logic_element, process_scheme, parent_widget, tag='Первый'):
+        image_path = QtGui.QPixmap('icon/FlowSource.png')
+        super().__init__(x, y, parent_widget, tag=tag, image_path=image_path, logic_element=logic_element, process_scheme=process_scheme)
 
 class QPump(DraggableObject):
     def __init__(self, x, y, logic_element, process_scheme, parent_widget, tag='Насос'):
-        image_path = QtGui.QPixmap('icon/MOT_2.png')
+        image_path = QtGui.QPixmap('icon/MOT.png')
         super().__init__(x, y, parent_widget, tag=tag, image_path=image_path, logic_element=logic_element, process_scheme=process_scheme)
 
 class QMov(DraggableObject):
     def __init__(self, x, y, logic_element, process_scheme, parent_widget, tag='Задвижка'):
-        image_path = QtGui.QPixmap('icon/MOV_2.png')
+        image_path = QtGui.QPixmap('icon/MOV.png')
         super().__init__(x, y, parent_widget, tag=tag, image_path=image_path, logic_element=logic_element, process_scheme=process_scheme)
 
 class QBoiler(DraggableObject):
@@ -202,10 +224,11 @@ class QBoiler(DraggableObject):
         self.working = state
 
     def paint(self, painter):
-        self.draw_background(painter)
-        self.draw_icon(painter)
-        self.draw_label(painter)
-        self.draw_indicator(painter)
+        super().paint(painter)
+        # self.draw_background(painter)
+        # self.draw_icon(painter)
+        # self.draw_label(painter)
+        # self.draw_indicator(painter)
 
     def draw_background(self, painter):
         painter.setBrush(self.color)
@@ -367,7 +390,7 @@ class QPipe(DraggableObject):
 
     def __init__(self, start_point:ConnectionPoint, end_point:ConnectionPoint, start_logic, end_logic, logic_element=None,
                  process_scheme=None, parent_widget=None):
-        super().__init__(0, 0, parent_widget, tag='', size=0, color=QtGui.QColor(0,0,0,0))
+        super().__init__(0, 0, parent_widget, tag='', size=0, color=QtGui.QColor(0,0,0,0),process_scheme=process_scheme, logic_element=logic_element)
         # self.start_point = start_point
         # self.end_point = end_point
         self.sensors = []
@@ -375,7 +398,6 @@ class QPipe(DraggableObject):
         self.in_point.pipe = self
         self.out_point = end_point
         self.out_point.pipe = self
-        self.logic_element = logic_element
         # self.path_points:list[QPoint] = []
         self.path_points = []
         if self.logic_element and process_scheme:
@@ -607,6 +629,7 @@ class QPipe(DraggableObject):
                 sensor.delete()
             self.sensors = []
         self.parent_widget.pipes.remove(self)
+        self.process_scheme.remove_element(self.logic_element.index)
 
 
 class QPipeIntersection(DraggableObject):
@@ -682,7 +705,7 @@ class QPipeIntersection(DraggableObject):
             pt.i = i
             pt.paint(painter, i=i)
 
-
+    
 class QSensor:
     SENSOR_UNITS = {
         "temperature": "°C",
@@ -710,7 +733,7 @@ class QSensor:
         else:
             sensor_type = getattr(self.logic_element, "sensor_type", None)
             self.unit = self.SENSOR_UNITS.get(sensor_type, "")
-
+        self.model = ModelSettings(self)
         #asd
 
 
@@ -803,6 +826,7 @@ class WidgetWithObjects(QtWidgets.QOpenGLWidget):
         self.setGeometry(0, 0, 1300, 800)
         self.objects:list[DraggableObject] = []
         self.selected_object = None
+        self.settings_selected_object = None
         self.offset = QtCore.QPoint()
         self.proximity_threshold = 0
         self.grid_size = 20  # Размер клетки сетки
@@ -881,6 +905,25 @@ class WidgetWithObjects(QtWidgets.QOpenGLWidget):
             obj.paint(painter)
             if hasattr(obj, "image") and not obj.image.isNull():
                 painter.drawPixmap(obj.position.x(), obj.position.y(), obj.size, obj.size, obj.image)
+
+        # --- Подсветка выбранного для настроек объекта ---
+        if self.settings_selected_object is not None:
+            obj = self.settings_selected_object
+            if type(obj) == QPipe:
+                pass
+            else:
+                # Для обычных объектов
+                if hasattr(obj, "get_rect"):
+                    rect = obj.get_rect()
+                else:
+                    # запасной вариант
+                    rect = QtCore.QRect(obj.position.x(), obj.position.y(), obj.size, obj.size)
+
+                highlight_pen = QtGui.QPen(QtCore.Qt.red, 2, QtCore.Qt.DashLine)
+                painter.setPen(highlight_pen)
+                painter.setBrush(QtCore.Qt.NoBrush)
+                painter.drawRect(rect)
+
         painter.restore()
 
     def draw_grid(self, painter):
@@ -1024,6 +1067,10 @@ class WidgetWithObjects(QtWidgets.QOpenGLWidget):
                                 self.unsetCursor()
                                 self.update()
                     return
+                elif self.selected_element == "QFlowSource":
+                    logic_obj = FlowSourceElement()
+                    new_obj = QFlowSource(pos.x(), pos.y(), parent_widget=self, logic_element=logic_obj, process_scheme=self.process_scheme)
+
                 else:
                     new_obj = DraggableObject(pos.x(), pos.y())
                 # Привязка к сетке
@@ -1054,6 +1101,22 @@ class WidgetWithObjects(QtWidgets.QOpenGLWidget):
                     self.offset = scene_pos - obj.position
                     self.update()
                     break
+
+    def mouseDoubleClickEvent(self, event):
+        scene_pos = self.pos_scene(event)
+        # Ищем объект под курсором
+        for obj in reversed(self.objects):
+            if obj.contains(scene_pos):
+                # Сообщаем контроллеру, что этот объект выбран для настроек
+                self.controller.set_settings_object(obj)
+                self.settings_selected_object = obj
+                self.update()
+                break
+        else:
+            # Если ни один объект не найден, можно сбросить выбор
+            self.controller.set_settings_object(None)
+            self.settings_selected_object = None
+            self.update()
 
 
     def mouseMoveEvent(self, event):
@@ -1091,13 +1154,6 @@ class WidgetWithObjects(QtWidgets.QOpenGLWidget):
             if can_move:
                 self.selected_object.position = new_pos
                 self.update()
-
-
-
-
-
-
-
             # # Перетаскивание объекта
             # scene_pos = self.pos_scene(event)
             # new_pos = scene_pos - self.offset
@@ -1376,6 +1432,258 @@ class ControlMenu(QtWidgets.QToolBar):
         self.addSeparator()
 
 
+class ModelSettings:
+    def __init__(self, element):
+        if type(element) == QSensor:
+            self.logic_element:Sensor = element.logic_element
+        else:
+            self.logic_element:BaseElement = element.logic_element
+        self.index = self.logic_element.index
+        self.parameters:dict = self.logic_element.get_parameters()
+
+    def get_parameters(self):
+        self.parameters = self.logic_element.get_parameters()
+        return self.parameters
+
+
+class SettingsMenu(QtWidgets.QDockWidget):
+    def __init__(self,parent_widget):
+        super().__init__('Настройки', parent_widget)
+        self.setMinimumSize(QtCore.QSize(220, 300))
+        self.setStyleSheet("background-color: rgb(177, 177, 177);")
+        self.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+
+        self._widget = QtWidgets.QWidget()
+        self._layout = QtWidgets.QFormLayout(self._widget)
+        self.setWidget(self._widget)
+
+        self.current_element = None
+        self.current_model = None
+        self.controller = parent_widget.controller
+        self.controller.settings_object_changed.connect(self.set_element)
+
+
+        self._widget = QtWidgets.QWidget()
+        self._v_layout = QtWidgets.QVBoxLayout(self._widget)
+
+        # Блок информации об объекте (то, что из parameters['object'])
+        self.info_layout = QtWidgets.QFormLayout()
+        self._v_layout.addLayout(self.info_layout)
+
+        # Разделитель
+        self._v_layout.addSpacing(8)
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
+        line.setFrameShadow(QtWidgets.QFrame.Sunken)
+        self._v_layout.addWidget(line)
+
+        # Блок редактируемых параметров
+        self.form_layout = QtWidgets.QFormLayout()
+        self._v_layout.addLayout(self.form_layout)
+
+        self.setWidget(self._widget)
+
+        self.current_element = None
+        self.current_model = None
+        self.controller = parent_widget.controller
+        self.controller.settings_object_changed.connect(self.set_element)
+
+
+
+
+    def set_element(self, element):
+        self.current_element = element
+        if element is None:
+            self._clear_info()
+            self._clear_form()
+            return
+
+        # Берём ModelSettings из объекта
+        if not hasattr(element, "model") or element.model is None:
+            element.model = ModelSettings(element)
+        self.current_model = element.model
+
+        self._rebuild()
+
+    def _clear_info(self):
+        while self.info_layout.count():
+            item = self.info_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+
+    def _clear_form(self):
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        while self.form_layout.count():
+            item = self.form_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+    def _rebuild(self):
+        self._clear_info()
+        self._clear_form()
+
+        params = self.current_model.get_parameters()
+
+        # 1) Паспорт объекта: params.get('object')
+        passport = params.get('object')
+        if isinstance(passport, dict):
+            self._build_object_info(passport)
+
+        #self._rebuild_form()
+
+        # 2) Остальные параметры — как раньше, кроме 'object'
+        for name, raw in params.items():
+            if name == 'object':
+                continue
+            self._add_param_widget(name, raw)
+
+
+    def _build_object_info(self, passport: dict):
+        """
+        passport = {
+            'object': {...},
+            'tag': {...},
+            'index': {...},
+            ...
+        }
+        """
+        # Имя объекта
+        obj_meta = passport.get('object')
+        if obj_meta is not None:
+            # value = self (объект); можно красиво отформатировать
+            obj = obj_meta.get('value')
+            # Например: QPipe (#4) или просто тип
+            type_name = type(obj).__name__ if obj is not None else "—"
+            label_text = obj_meta.get('label', 'Объект')
+            self.info_layout.addRow(
+                QtWidgets.QLabel(label_text + ":"),
+                QtWidgets.QLabel(type_name)
+            )
+
+        # Тег (общий)
+        tag_meta = passport.get('tag')
+        if tag_meta is not None:
+            tag_val = tag_meta.get('value', '')
+            label_text = tag_meta.get('label', 'Тег')
+            self.info_layout.addRow(
+                QtWidgets.QLabel(label_text + ":"),
+                QtWidgets.QLabel(str(tag_val))
+            )
+
+        # Индекс
+        idx_meta = passport.get('index')
+        if idx_meta is not None:
+            idx_val = idx_meta.get('value', '')
+            label_text = idx_meta.get('label', 'Индекс')
+            self.info_layout.addRow(
+                QtWidgets.QLabel(label_text + ":"),
+                QtWidgets.QLabel(str(idx_val))
+            )
+
+    def _add_param_widget(self, name, raw):
+        # raw может быть:
+        # 1) dict с value/type/label
+        # 2) голое значение
+        if isinstance(raw, dict) and "value" in raw and "type" in raw:
+            meta = raw
+            value = raw.get("value")
+            ptype = meta.get("type")
+            label_text = meta.get("label", name)
+        else:
+            meta = {
+                "value": raw,
+                "type": type(raw).__name__,
+                "label": name
+            }
+
+        value = meta.get("value")
+        ptype = meta.get("type")
+        label_text = meta.get("label", name)
+
+        label = QtWidgets.QLabel(label_text)
+
+        # здесь создаёшь нужный редактор (QLineEdit / QDoubleSpinBox / QCheckBox и т.д.)
+        # пока можно оставить простой вариант:
+        editor = self._create_editor_for_type(name, value, meta, ptype)
+        self.form_layout.addRow(label, editor)
+
+    def _create_editor_for_type(self, name, value, meta, ptype):
+        elem = self.current_model.logic_element
+
+        if ptype == "bool":
+            cb = QtWidgets.QCheckBox()
+            cb.setChecked(bool(value))
+            cb.stateChanged.connect(
+                lambda state, n=name: self._on_param_changed(n, bool(state))
+            )
+            return cb
+
+        elif ptype in ("float", "double"):
+            sb = QtWidgets.QDoubleSpinBox()
+            sb.setStyleSheet("background-color: rgb(255, 255, 255);")
+            sb.setDecimals(4)
+            sb.setRange(meta.get("min", -1e9), meta.get("max", 1e9))
+            sb.setSingleStep(meta.get("step", 0.1))
+            sb.setValue(float(value))
+            sb.valueChanged.connect(
+                lambda val, n=name: self._on_param_changed(n, float(val))
+            )
+            return sb
+
+        elif ptype in ("int", "integer"):
+            sb = QtWidgets.QSpinBox()
+            sb.setStyleSheet("background-color: rgb(255, 255, 255);")
+            sb.setRange(int(meta.get("min", -1e9)), int(meta.get("max", 1e9)))
+            sb.setSingleStep(int(meta.get("step", 1)))
+            sb.setValue(int(value))
+            sb.valueChanged.connect(
+                lambda val, n=name: self._on_param_changed(n, int(val))
+            )
+            return sb
+
+        elif ptype == "choice":
+            combo = QtWidgets.QComboBox()
+            combo.setStyleSheet("background-color: rgb(255, 255, 255);")
+            choices = meta.get("choices", [])
+            combo.addItems(choices)
+            if value in choices:
+                combo.setCurrentText(value)
+            combo.currentTextChanged.connect(
+                lambda text, n=name: self._on_param_changed(n, text)
+            )
+            return combo
+
+        else:
+            # строка по умолчанию
+            le = QtWidgets.QLineEdit(str(value))
+            le.editingFinished.connect(
+                lambda n=name, w=le: self._on_param_changed(n, w.text())
+            )
+            return le
+
+    def _on_param_changed(self, name, value):
+        elem = self.current_model.logic_element
+
+        # 1. Если есть сеттер set_<name>, используем его
+        setter_name = f"set_{name}"
+        if hasattr(elem, setter_name) and callable(getattr(elem, setter_name)):
+            getattr(elem, setter_name)(value)
+            return
+
+        # 2. Иначе пробуем напрямую свойство
+        if hasattr(elem, name):
+            setattr(elem, name, value)
+            return
+        # при желании можно логировать, если параметр не смог примениться
+
 
 # --- Основная часть ---
 class MainWindow(QtWidgets.QMainWindow):
@@ -1409,14 +1717,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dockWidgetContents = QtWidgets.QListWidget()
         self.dockWidgetContents.setIconSize(QtCore.QSize(48, 48))
         items = [
-            ("QPump", "icon/MOT_2.png"),
-            ("QMov", "icon/MOV_2.png"),
+            ("QPump", "icon/MOT.png"),
+            ("QMov", "icon/MOV.png"),
             ("QBoiler", "icon/BOILER.png"),
             ("QPipe", "icon/PIPE.png"),
             ("QPipeIntersection|Split", "icon/PipeIntersection.png"),
             ("QPipeIntersection|Merge", "icon/PipeIntersection_merge.png"),
-            ('QSensor', "icon/Sensor.png" )
+            ('QSensor', "icon/Sensor.png" ),
+            ('QFlowSource', "icon/FlowSource.png")
         ]
+
         for name, icon_path in items:
             item = QtWidgets.QListWidgetItem(QtGui.QIcon(icon_path), name)
             self.dockWidgetContents.addItem(item)
@@ -1432,6 +1742,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update_sensors)
         self.update_timer.start(500)  # обновлять каждые 500 мс (0.5 сек)
+
+        self.settings_menu = SettingsMenu(self)
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.settings_menu)
 
 
     def update_sensors(self):
