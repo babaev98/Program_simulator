@@ -1,6 +1,39 @@
 import random
 from PyQt5.QtCore import QObject, pyqtSignal
 
+
+class ModelModbusData:
+    """
+    Описание Modbus-тэгов для одного логического элемента.
+    Без конкретных адресов — только 'что нужно', а не 'где лежит'.
+    """
+    def __init__(self, element):
+
+        self.element = element    # ссылка на логический элемент
+        self.teg = self.element.teg
+        self.inputs = {}          # имя_поля -> описание входного сигнала
+        self.outputs = {}         # имя_поля -> описание выходного сигнала
+
+    def add_input(self, name, sig_type, width=1, scale=1.0):
+        """
+        name: имя поля логического элемента (например, 'status', 'power')
+        sig_type: 'coil', 'hr', 'ir', ...
+        width: количество регистров (на будущее)
+        """
+        self.inputs[name] = {
+            "type": sig_type,
+            "width": width,
+            "scale": scale,
+        }
+
+    def add_output(self, name, sig_type, width=1, scale=1.0):
+        self.outputs[name] = {
+            "type": sig_type,
+            "width": width,
+            "scale": scale,
+        }
+
+
 class ProcessScheme(QObject):
     chain_initialized = pyqtSignal()      # Сигнал: цепь построена
     chain_not_initialized = pyqtSignal()  # Сигнал: требуется новая

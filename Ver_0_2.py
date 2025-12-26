@@ -1664,6 +1664,7 @@ class SettingsMenu(QtWidgets.QDockWidget):
         else:
             # строка по умолчанию
             le = QtWidgets.QLineEdit(str(value))
+            le.setStyleSheet("background-color: rgb(255, 255, 255);")
             le.editingFinished.connect(
                 lambda n=name, w=le: self._on_param_changed(n, w.text())
             )
